@@ -1,16 +1,16 @@
 from functools import partial
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, cast
 
 from git import Repo
 from git.objects import Commit
 
 from opal_common.paths import PathUtils
-from opal_common.git.commit_viewer import CommitViewer, VersionedFile, has_extension, is_under_directories
+from opal_common.git.commit_viewer import CommitViewer, VersionedDirectory, VersionedFile, VersionedNode, has_extension, is_under_directories
 from opal_common.git.diff_viewer import DiffViewer, diffed_file_has_extension, diffed_file_is_under_directories
 from opal_common.opa import get_rego_package, is_data_module, is_rego_module
 from opal_common.schemas.policy import DataModule, PolicyBundle, RegoModule, DeletedFiles
-
+from opal_common import logger
 
 class BundleMaker:
     """
@@ -22,7 +22,7 @@ class BundleMaker:
     - a full/complete bundle, representing the state of the repo at one commit
     - a diff bundle, representing only the *changes* made to the policy between two commits (the diff).
     """
-    def __init__(self, repo: Repo, in_directories: Set[Path], extensions: Optional[List[str]] = None, manifest_filename: str = ".manifest"):
+    def __init__(self, repo: Repo, in_directories: Set[Path], extensions: Optional[List[str]] = None, root_manifest_path: str = ".manifest"):
         """[summary]
 
         Args:
@@ -38,7 +38,7 @@ class BundleMaker:
         self._is_under_directories = partial(is_under_directories, directories=in_directories)
         self._diffed_file_has_extension = partial(diffed_file_has_extension, extensions=extensions)
         self._diffed_file_is_under_directories = partial(diffed_file_is_under_directories, directories=in_directories)
-        self._manifest_filename = manifest_filename
+        self._root_manifest_path = Path(root_manifest_path)
 
     def _get_explicit_manifest(self, viewer: CommitViewer) -> Optional[List[str]]:
         """
@@ -54,18 +54,52 @@ class BundleMaker:
 
         This method searches for an explicit manifest file, reads it and returns the list of paths, or None if not found.
         """
-        def is_manifest_file(f: VersionedFile) -> bool:
-            return f.path == Path(self._manifest_filename)
+        visited_manifests = []
 
-        manifest_files = list(viewer.files(is_manifest_file))
-        if not manifest_files:
-            return None
+        def _expand_explicit_manifest(dir: VersionedDirectory, manifest_file: Optional[VersionedFile] = None) -> List[str]:
+            manifest_file = manifest_file or viewer.get_file(dir.path.joinpath(".manifest"))            
+            if manifest_file is None:
+                return List[str]()
 
+            if manifest_file in visited_manifests:
+                return List[str]()
+            visited_manifests.append(manifest_file)
+            
+            file_entries = List[str]()
+            dir_entries = List[VersionedDirectory]()
+
+            for path_entry in manifest_file.read().splitlines():
+                path_entry = dir.path.joinpath(path_entry) # Paths are relative to current directory
+                if not viewer.exists(path_entry):
+                    continue
+
+                dir_entry = viewer.get_directory(path_entry)
+                if dir_entry is not None:
+                    dir_entries.append(dir_entry)
+                    continue
+                
+                # This is an existing file
+                file_entries.append(str(path_entry))
+
+            for dir_entry in dir_entries: 
+                try:
+                    file_entries += expand_explicit_manifest(dir_entry)
+                except Exception as e:
+                    logger.warning(f"Failed to read manifest from {dir_entry}, error: {str(e)}") 
+                    continue
+
+            return file_entries
+        
+        root_manifest = viewer.get_node(self._root_manifest_path)
         try:
-            manifest_paths = [Path(path) for path in manifest_files[0].read().splitlines()]
-            return [str(path) for path in manifest_paths if viewer.exists(path)]
-        except:
-            return None
+            if isinstance(root_manifest, VersionedFile):
+                return _expand_explicit_manifest(viewer.get_directory(self._root_manifest_path.parent), root_manifest)
+
+            elif isinstance(root_manifest, VersionedDirectory):
+                return _expand_explicit_manifest(root_manifest)
+
+        except Exception as e:
+            logger.warning(f"Failed to read explicit manifest, error: {str(e)}") 
 
     def _sort_manifest(self, unsorted_manifest: List[str], explicit_sorting: Optional[List[str]]) -> List[str]:
         """

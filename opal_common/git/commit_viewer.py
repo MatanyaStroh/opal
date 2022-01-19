@@ -210,6 +210,33 @@ class CommitViewer:
                 if filter(directory):
                     yield directory
 
+    def get_node(self, path: Path) -> VersionedNode:
+        """
+        Returns the node in the given path, None if it doesn't exist
+        """
+        nodes = self.nodes(lambda n: n.path == path)
+        if nodes is None:
+            return None
+        return nodes[0]        
+    
+    def get_directory(self, path: Path) -> VersionedDirectory:
+        """
+        Returns the directory in the given path, None if it doesn't exist
+        """
+        dirs = self.directories(lambda f: f.path == path)
+        if dirs is None:
+            return None
+        return dirs[0]
+
+    def get_file(self, path: Path) -> VersionedFile:
+        """
+        Returns the file in the given path, None if it doesn't exist
+        """
+        files = self.files(lambda f: f.path == path)
+        if files is None:
+            return None
+        return files[0]
+
     @property
     def paths(self) -> List[Path]:
         """
